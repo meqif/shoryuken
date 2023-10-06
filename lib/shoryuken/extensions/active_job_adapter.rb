@@ -28,6 +28,10 @@ module ActiveJob
         def enqueue_at(job, timestamp)
           instance.enqueue_at(job, timestamp)
         end
+
+        def enqueue_all(jobs)
+          instance.enqueue_all(jobs)
+        end
       end
 
       def enqueue(job, options = {}) #:nodoc:
@@ -43,6 +47,29 @@ module ActiveJob
 
       def enqueue_at(job, timestamp) #:nodoc:
         enqueue(job, delay_seconds: calculate_delay(timestamp))
+      end
+
+      def enqueue_all(jobs) #:nodoc:
+        enqueued_job_count = 0
+
+        jobs.group_by(&:queue_name).each do |queue_name, queue_jobs|
+          Shoryuken.register_worker(queue_name, JobWrapper)
+
+          queue = Shoryuken::Client.queues(queue_name)
+
+          messages = queue_jobs.map do |job|
+            job.sqs_send_message_parameters.merge!(delay_seconds: calculate_delay(job.scheduled_at.to_f)) if job.scheduled_at
+
+            send_message_params = message(queue, job)
+            job.sqs_send_message_parameters = send_message_params
+            send_message_params
+          end
+
+          queue.send_messages(messages)
+          enqueued_job_count += queue_jobs.count
+        end
+
+        enqueued_job_count
       end
 
       private

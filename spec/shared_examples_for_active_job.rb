@@ -192,6 +192,70 @@ RSpec.shared_examples 'active_job_adapters' do
     end
   end
 
+  describe '#enqueue_all' do
+    let(:jobs) do
+      [
+        TestJob.new.set(queue: 'foo').tap { |job| job.sqs_send_message_parameters = {} },
+        TestJob.new.set(queue: 'bar', wait: 12).tap { |job| job.sqs_send_message_parameters = {} },
+        TestJob.new.set(queue: 'foo', wait: 34).tap { |job| job.sqs_send_message_parameters = {} },
+      ]
+    end
+    let(:queue_foo) { double 'QueueFoo', fifo?: fifo }
+    let(:queue_bar) { double 'QueueBar', fifo?: fifo }
+
+    before do
+      allow(Shoryuken::Client).to receive(:queues).with(jobs[0].queue_name).and_return(queue_foo)
+      allow(Shoryuken::Client).to receive(:queues).with(jobs[1].queue_name).and_return(queue_bar)
+    end
+
+    specify do
+      expect(queue_foo).to receive(:send_messages) do |messages|
+        expect(messages.count).to eq(2)
+
+        hash = messages.first
+        expect(hash[:message_deduplication_id]).to_not be
+        expect(hash.dig(:message_attributes, 'shoryuken_class', :string_value)).to eq(described_class::JobWrapper.to_s)
+        expect(hash.dig(:message_attributes, 'shoryuken_class', :data_type)).to eq("String")
+        expect(hash[:message_attributes].keys).to eq(['shoryuken_class'])
+        expect(hash[:delay_seconds]).to be_nil
+
+        hash = messages.last
+        expect(hash[:message_deduplication_id]).to_not be
+        expect(hash.dig(:message_attributes, 'shoryuken_class', :string_value)).to eq(described_class::JobWrapper.to_s)
+        expect(hash.dig(:message_attributes, 'shoryuken_class', :data_type)).to eq("String")
+        expect(hash[:message_attributes].keys).to eq(['shoryuken_class'])
+        expect(hash[:delay_seconds]).to eq(34)
+      end
+
+      expect(queue_bar).to receive(:send_messages) do |messages|
+        expect(messages.count).to eq(1)
+
+        hash = messages.first
+        expect(hash[:message_deduplication_id]).to_not be
+        expect(hash.dig(:message_attributes, 'shoryuken_class', :string_value)).to eq(described_class::JobWrapper.to_s)
+        expect(hash.dig(:message_attributes, 'shoryuken_class', :data_type)).to eq("String")
+        expect(hash[:message_attributes].keys).to eq(['shoryuken_class'])
+        expect(hash[:delay_seconds]).to eq(12)
+      end
+
+      expect(Shoryuken).to receive(:register_worker).with(jobs[0].queue_name, described_class::JobWrapper)
+      expect(Shoryuken).to receive(:register_worker).with(jobs[1].queue_name, described_class::JobWrapper)
+
+      subject.enqueue_all(jobs)
+    end
+
+    it "should mutate the jobs' sqs_send_message_parameters reference to match those sent to the queue" do
+      expect(queue_foo).to receive(:send_messages) do |messages|
+        expect(messages.first).to be(jobs.first.sqs_send_message_parameters)
+        expect(messages.last).to be(jobs.last.sqs_send_message_parameters)
+      end
+      expect(queue_bar).to receive(:send_messages) do |messages|
+        expect(messages.first).to be(jobs[1].sqs_send_message_parameters)
+      end
+      subject.enqueue_all(jobs)
+    end
+  end
+
   context 'with message_system_attributes' do
     context 'when message_system_attributes are specified in options' do
       it 'should enqueue a message with message_system_attributes specified in options' do
